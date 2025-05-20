@@ -1,3 +1,5 @@
+// Ideas - Replay System
+
 #define GLM_ENABLE_EXPERIMENTAL
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
@@ -32,6 +34,13 @@ const float MAX_THROTTLE = 1.0f;
 const float ROTATIONAL_DRAG = 0.3f;
 const int NUM_MOTORS = 4;
 
+// Game state
+enum class GameState {
+    MAIN_MENU,
+    SETTINGS_MENU,
+    SIMULATION
+};
+
 // Global state variables
 int currentWidth = SCR_WIDTH;
 int currentHeight = SCR_HEIGHT;
@@ -43,6 +52,7 @@ float previousTotalCurrentDraw = 0.0f;
 float cameraAngle = 0.0f;
 const float CAMERA_ANGLE_INCREMENT = 5.0f;
 bool armed = false;
+GameState currentGameState = GameState::MAIN_MENU;
 
 // OpenGL related variables
 std::string glVersionString;
@@ -76,6 +86,16 @@ bool showBatteryInfo = true;
 bool showMotorInfo = true;
 bool showControlInfo = true;
 
+// Shutdown ImGui
+void shutdownImGui() {
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
+}
+
+// Update window title with drone and simulation info sjidhiushfijhsiufhidjshfjidshfkjdshjkfhdskjfhdksjfhkjdshfkjdshfkjdshfjkdshfkjhdskjfhdksjfhkjsdhfksjhdfsenf
+
+
 // Forward declarations
 void initializeDrone();
 void updateMotors(float deltaTime);
@@ -84,6 +104,13 @@ void updateGroundContacts();
 bool isDroneOnGround();
 void handleGroundCollision();
 std::string getBatteryTypeName(BatteryType type);
+void renderMainMenu();
+void renderSettingsMenu();
+void initImGui(GLFWwindow* window);
+void shutdownImGui();
+void updateWindowTitle(GLFWwindow* window, float fps);
+void renderJoystickControls();
+void renderBatteryWarnings();
 
 // Control settings structure
 struct ControlSettings {
@@ -368,8 +395,8 @@ struct DroneFrameSize {
 
     // Additional contact points for better ground interaction
     static const int NUM_CONTACT_POINTS = 9;  // 4 corners + 4 motor mounts + center
-    glm::vec3 contactPoints[NUM_CONTACT_POINTS]; // Local space positions
-    float contactPointMass[NUM_CONTACT_POINTS]; // Distribution of mass at each point
+    glm::vec3 contactPoints[NUM_CONTACT_POINTS] = { glm::vec3(0.0f) }; // More explicit initialization
+    float contactPointMass[NUM_CONTACT_POINTS] = { 0.0f }; // More explicit initialization
 
     void updateFromConfig(const DroneConfig& config) {
         // Update frame size in metric from frameSize in config (which is in meters)
@@ -438,21 +465,21 @@ DroneFrameSize droneFrame;
 struct DroneGroundContact {
     static const int MAX_CONTACTS = DroneFrameSize::NUM_CONTACT_POINTS;
 
-    bool inContact[MAX_CONTACTS];        // Whether each point is in contact with ground
-    float groundDistances[MAX_CONTACTS]; // Distance of each point from ground
-    glm::vec3 worldPoints[MAX_CONTACTS]; // Contact points in world space
-    float penetrationDepths[MAX_CONTACTS]; // How deep each point is penetrating the ground
-    glm::vec3 impactNormals[MAX_CONTACTS]; // Surface normal at contact point
-    float impactForces[MAX_CONTACTS];    // Force of impact at each point
+    bool inContact[MAX_CONTACTS] = {};        // Initialize with false
+    float groundDistances[MAX_CONTACTS] = {}; // Initialize with zeros
+    glm::vec3 worldPoints[MAX_CONTACTS] = {}; // Initialize with zeros
+    float penetrationDepths[MAX_CONTACTS] = {}; // Initialize with zeros
+    glm::vec3 impactNormals[MAX_CONTACTS] = {}; // Initialize with zeros
+    float impactForces[MAX_CONTACTS] = {};    // Initialize with zeros
 
     int totalContactsCount = 0;          // Number of points currently in contact
     float maxPenetrationDepth = 0.0f;    // Maximum penetration depth
     bool isGrounded = false;             // Whether the drone is considered grounded
 
     // Collision detection optimization
-    glm::vec3 boundingBoxMin;            // Minimum point of bounding box in world space
-    glm::vec3 boundingBoxMax;            // Maximum point of bounding box in world space
-    bool boundingBoxUpdated = false;     // Whether the bounding box needs updating
+    glm::vec3 boundingBoxMin = glm::vec3(0.0f);  // Initialize with zeros
+    glm::vec3 boundingBoxMax = glm::vec3(0.0f);  // Initialize with zeros
+    bool boundingBoxUpdated = false;
 
     // For stability calculation
     float leftRightBalance = 0.0f;       // -1 = all left, +1 = all right
@@ -760,6 +787,28 @@ void initializeDrone() {
         << " | TWR: " << std::fixed << std::setprecision(1) << thrustToWeight << ":1"
         << std::endl;
 }
+
+// Initialize ImGui
+void initImGui(GLFWwindow* window) {
+    // Setup Dear ImGui context
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO(); (void)io;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+
+    // Setup Dear ImGui style
+    ImGui::StyleColorsDark();
+
+    // Setup Platform/Renderer backends
+    const char* glsl_version = "#version 330";
+    ImGui_ImplGlfw_InitForOpenGL(window, true);
+    ImGui_ImplOpenGL3_Init(glsl_version);
+
+    // Load default font
+    io.Fonts->AddFontDefault();
+}
+
 //-------------------------------------------------------
 // Physics Simulation
 //-------------------------------------------------------
@@ -1267,6 +1316,21 @@ void processInput(GLFWwindow* window) {
     // Cap deltaTime to avoid large jumps in physics when framerate drops or debugging
     if (deltaTime > 0.05f) deltaTime = 0.05f;
 
+    // Handle ESC key to open pause menu instead of quitting
+    static float lastEscPressTime = 0.0f;
+    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS && 
+        (currentTime - lastEscPressTime > 0.3f)) {
+        if (currentGameState == GameState::SIMULATION) {
+            currentGameState = GameState::MAIN_MENU;
+        }
+        lastEscPressTime = currentTime;
+    }
+
+    // Only process simulation inputs when in simulation mode
+    if (currentGameState != GameState::SIMULATION) {
+        return;
+    }
+
     // Handle keyboard inputs
     static float lastKeyPressTime = 0.0f;
     float keyDebounceTime = 0.3f;
@@ -1304,9 +1368,6 @@ void processInput(GLFWwindow* window) {
     if (glfwGetKey(window, GLFW_KEY_R) == GLFW_PRESS) {
         initializeDrone();
     }
-
-    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
-        glfwSetWindowShouldClose(window, true);
 
     // Camera angle controls
     if (glfwGetKey(window, GLFW_KEY_PAGE_UP) == GLFW_PRESS && (currentTime - lastKeyPressTime) > keyDebounceTime) {
@@ -1606,6 +1667,15 @@ void processInput(GLFWwindow* window) {
     if (dronePosition.y < absoluteMinHeight) {
         dronePosition.y = absoluteMinHeight;
         velocity.y = 0.0f;  // Kill vertical velocity when hitting absolute floor
+    }
+
+    // Prevent drone from getting too far from origin
+    if (std::isnan(dronePosition.x) || std::isnan(dronePosition.y) || std::isnan(dronePosition.z) ||
+        std::abs(dronePosition.x) > 5000.0f || std::abs(dronePosition.y) > 5000.0f || std::abs(dronePosition.z) > 5000.0f) {
+        // Reset drone to a safe position
+        dronePosition = glm::vec3(0.0f, 1.0f, 3.0f);
+        velocity = glm::vec3(0.0f);
+        std::cout << "Warning: Drone position reset due to out-of-bounds values" << std::endl;
     }
 }
 
@@ -1932,91 +2002,273 @@ void drawSkybox(const glm::mat4& projection, const glm::mat4& view) {
 // UI Rendering
 //-------------------------------------------------------
 
-// Update window title with drone and simulation info
-void updateWindowTitle(GLFWwindow* window, float fps) {
-    std::stringstream title;
-    glm::vec3 eulerAngles = quatToEuler(droneQuat);
+// Render the main menu screen
+void renderMainMenu() {
+    ImGuiIO& io = ImGui::GetIO();
 
-    float speedMS = glm::length(velocity);
-    float speedKMH = speedMS * MS_TO_KMH;
+    // Get the window from global scope
+    GLFWwindow* window = static_cast<GLFWwindow*>(glfwGetCurrentContext());
 
-    auto currentTime = std::chrono::steady_clock::now();
-    std::chrono::duration<float> elapsedSeconds = currentTime - simulationStartTime;
-    int elapsedMinutes = static_cast<int>(elapsedSeconds.count()) / 60;
-    int elapsedSecondsRemainder = static_cast<int>(elapsedSeconds.count()) % 60;
-
-    float batteryPercentage = (battery.charge / battery.capacity) * 100.0f;
-
-    // If battery is depleted, show a more prominent warning
-    if (battery.isDepleted) {
-        title << "!!! BATTERY DEPLETED !!! | ";
+    // Center the menu in the window
+    ImVec2 windowSize(400.0f, 300.0f);
+    ImVec2 windowPos(
+        (io.DisplaySize.x - windowSize.x) * 0.5f,
+        (io.DisplaySize.y - windowSize.y) * 0.5f
+    );
+    
+    ImGui::SetNextWindowPos(windowPos);
+    ImGui::SetNextWindowSize(windowSize);
+    
+    ImGuiWindowFlags flags = 
+        ImGuiWindowFlags_NoResize | 
+        ImGuiWindowFlags_NoMove | 
+        ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoSavedSettings;
+    
+    // Check if we're coming from the simulation (pause menu) or starting fresh
+    bool isPauseMenu = false;
+    
+    // Find an active simulation by checking if motors are initialized
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        if (motors[i].maxRPM > 0) {
+            isPauseMenu = true;
+            break;
+        }
     }
-
-    title << "FPV Drone Sim | ";
-    title << (armed ? "ARMED | " : "DISARMED | ");
-    title << "FPS: " << std::fixed << std::setprecision(1) << fps << " | ";
-    title << getBatteryTypeName(droneConfig.batteryType) << " | ";
-    title << droneFrame.frameSizeInches << "\" Frame | ";
-    title << "FPV Cam: " << std::setprecision(0) << std::showpos << cameraAngle << "° | ";
-
-    if (showSimulationInfo) {
-        title << "Speed: " << std::setprecision(1) << speedKMH << " km/h | "
-            << "Alt: " << std::setprecision(1) << dronePosition.y << "m | ";
+    
+    ImGui::Begin(isPauseMenu ? "Game Paused" : "FPV Drone Simulator", nullptr, flags);
+    
+    ImGui::SetCursorPosY(40);
+    
+    // Title
+    const float titleFontSize = 28.0f;
+    auto titleText = isPauseMenu ? "Game Paused" : "FPV Drone Simulator";
+    ImVec2 textSize = ImGui::CalcTextSize(titleText);
+    ImGui::SetCursorPosX((windowSize.x - textSize.x) * 0.5f);
+    ImGui::Text("%s", titleText);
+    ImGui::Spacing();
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    ImGui::Spacing();
+    
+    // Buttons - centered and with consistent width
+    const float buttonWidth = 200.0f;
+    const float buttonHeight = 40.0f;
+    
+    // Resume/Start Button
+    ImGui::SetCursorPosX((windowSize.x - buttonWidth) * 0.5f);
+    if (ImGui::Button(isPauseMenu ? "Resume Game" : "Start Simulation", ImVec2(buttonWidth, buttonHeight))) {
+        currentGameState = GameState::SIMULATION;
+        if (!isPauseMenu) {
+            initializeDrone(); // Reset drone state only when starting fresh
+        }
     }
-
-    if (showControlInfo) {
-        title << "Throttle: " << std::setprecision(2) << controls.throttlePosition << " | ";
+    
+    ImGui::Spacing();
+    
+    // Settings Button
+    ImGui::SetCursorPosX((windowSize.x - buttonWidth) * 0.5f);
+    if (ImGui::Button("Settings", ImVec2(buttonWidth, buttonHeight))) {
+        currentGameState = GameState::SETTINGS_MENU;
     }
-
-    if (showBatteryInfo) {
-        // Show actual battery charge percentage
-        title << "Batt: " << std::setprecision(1) << batteryPercentage << "% | ";
-
-        // Show voltage with an indication when it's under load
-        float currentVoltage = battery.baseBatteryVoltage - battery.currentVoltageSag;
-        title << std::setprecision(1) << currentVoltage << "V";
-
-        // Show base voltage when under load
-        if (battery.currentVoltageSag > 0.2f) {
-            title << " (" << std::setprecision(1) << battery.baseBatteryVoltage << "V no load)";
+    
+    ImGui::Spacing();
+    
+    // Quit/Reset Button
+    ImGui::SetCursorPosX((windowSize.x - buttonWidth) * 0.5f);
+    if (isPauseMenu) {
+        if (ImGui::Button("Reset Simulation", ImVec2(buttonWidth, buttonHeight))) {
+            initializeDrone();
+            currentGameState = GameState::SIMULATION;
         }
+        
+        ImGui::Spacing();
+        
+        ImGui::SetCursorPosX((windowSize.x - buttonWidth) * 0.5f);
+    }
+    
+    if (ImGui::Button("Quit", ImVec2(buttonWidth, buttonHeight))) {
+        glfwSetWindowShouldClose(window, true);
+    }
+    
+    // Version info at bottom
+    ImGui::SetCursorPos(ImVec2(10, windowSize.y - 25));
+    ImGui::TextDisabled("v1.0.0");
+    
+    ImGui::End();
+}
 
-        // Warning system based on actual battery charge, not temporary voltage sag
-        if (battery.isDepleted) {
-            title << " [EMPTY]";
-        }
-        else if (batteryPercentage < 15.0f) {
-            title << " [LOW!]";     // Very low capacity
-        }
-        else if (batteryPercentage < 30.0f) {
-            title << " [Low]";      // Low capacity warning
-        }
+// Render the settings menu screen
+void renderSettingsMenu() {
+    ImGuiIO& io = ImGui::GetIO();
+    
+    // Center the menu in the window
+    ImVec2 windowSize(500.0f, 400.0f);
+    ImVec2 windowPos(
+        (io.DisplaySize.x - windowSize.x) * 0.5f,
+        (io.DisplaySize.y - windowSize.y) * 0.5f
+    );
+    
+    ImGui::SetNextWindowPos(windowPos);
+    ImGui::SetNextWindowSize(windowSize);
+    
+    ImGuiWindowFlags flags = 
+        ImGuiWindowFlags_NoResize | 
+        ImGuiWindowFlags_NoMove | 
+        ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoSavedSettings;
+    
+    ImGui::Begin("Settings", nullptr, flags);
+    
+    ImGui::SetCursorPosY(30);
+    
+    // Title
+    const float titleFontSize = 24.0f;
+    auto titleText = "Settings";
+    ImVec2 textSize = ImGui::CalcTextSize(titleText);
+    ImGui::SetCursorPosX((windowSize.x - textSize.x) * 0.5f);
+    ImGui::Text("%s", titleText);
+    ImGui::Spacing();
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    ImGui::Spacing();
+    
+    ImGui::Text("Settings will be implemented in a future update.");
+    
+    ImGui::Spacing();
+    ImGui::Spacing();
+    
+    // Back button at bottom
+    const float buttonWidth = 120.0f;
+    const float buttonHeight = 30.0f;
+    
+    ImGui::SetCursorPos(ImVec2((windowSize.x - buttonWidth) * 0.5f, windowSize.y - buttonHeight - 20));
+    if (ImGui::Button("Back", ImVec2(buttonWidth, buttonHeight))) {
+        currentGameState = GameState::MAIN_MENU;
+    }
+    
+    ImGui::End();
+}
 
-        // Show current draw when armed
-        if (armed && showMotorInfo) {
-            float totalAmps = 0.0f;
-            for (int i = 0; i < NUM_MOTORS; i++) {
-                totalAmps += motors[i].currentDraw;
+// Update the render function to support the menu system
+void renderImGuiInterface() {
+    // Start the Dear ImGui frame
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
+
+    // Render different UI based on game state
+    switch (currentGameState) {
+        case GameState::MAIN_MENU:
+            renderMainMenu();
+            break;
+            
+        case GameState::SETTINGS_MENU:
+            renderSettingsMenu();
+            break;
+            
+        case GameState::SIMULATION:
+            // Draw battery warnings on top of all windows
+            renderBatteryWarnings();
+
+            // Main control panel
+            ImGui::Begin("Drone Control Panel");
+            {
+                ImGui::Text("Drone Status");
+                ImGui::Separator();
+
+                // Armed status indicator
+                const ImVec4 statusColor = armed ? ImVec4(0.0f, 1.0f, 0.0f, 1.0f)
+                    : ImVec4(1.0f, 0.0f, 0.0f, 1.0f);
+                ImGui::TextColored(statusColor, "Status: %s", armed ? "ARMED" : "DISARMED");
+
+                // Arm/disarm button
+                if (ImGui::Button(armed ? "DISARM" : "ARM")) {
+                    if (!armed && isDroneOnGround()) {
+                        armed = true;
+                    }
+                    else if (armed) {
+                        // Disarm and reset controls
+                        armed = false;
+                        controls.throttlePosition = 0.0f;
+                        input = {};
+                        rotationRates = glm::vec3(0.0f);
+                        for (auto& motor : motors) {
+                            motor.targetThrottle = 0.0f;
+                            motor.currentThrottle = 0.0f;
+                            motor.isSpinning = false;
+                            motor.thrust = 0.0f;
+                        }
+                    }
+                }
+                
+                // Back to menu button
+                ImGui::SameLine();
+                if (ImGui::Button("Menu")) {
+                    currentGameState = GameState::MAIN_MENU;
+                }
+
+                ImGui::Separator();
+
+                // Battery info with progress bar
+                const float batteryPct = (battery.charge / battery.capacity) * 100.0f;
+                ImGui::Text("Battery: %.1f%% (%.1fV)", batteryPct, battery.voltage);
+                ImGui::ProgressBar(batteryPct / 100.0f, ImVec2(-1.0f, 0.0f), "");
+
+                // Battery type selector
+                const char* types[] = { "1S", "2S", "3S", "4S", "5S", "6S" };
+                int currentType = static_cast<int>(droneConfig.batteryType);
+                if (ImGui::Combo("Battery Type", &currentType, types, IM_ARRAYSIZE(types))) {
+                    droneConfig.batteryType = static_cast<BatteryType>(currentType);
+                    droneConfig.updateMinBatteryVoltage();
+                    battery.configureBattery(droneConfig.batteryType);
+                    initializeDrone();
+                }
+
+                ImGui::Separator();
+
+                // Motor information
+                if (ImGui::CollapsingHeader("Motors", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    for (int i = 0; i < NUM_MOTORS; ++i) {
+                        ImGui::PushID(i);
+                        ImGui::Text("Motor %d: %.0f RPM", i + 1, motors[i].currentRPM);
+                        ImGui::ProgressBar(motors[i].currentThrottle, ImVec2(-1.0f, 0.0f), "");
+                        ImGui::PopID();
+                    }
+                }
+
+                ImGui::Separator();
+
+                // Telemetry data
+                if (ImGui::CollapsingHeader("Telemetry", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    const glm::vec3 euler = quatToEuler(droneQuat);
+                    ImGui::Text("Position: X:%.2f Y:%.2f Z:%.2f",
+                        dronePosition.x, dronePosition.y, dronePosition.z);
+                    ImGui::Text("Angles: Roll:%.1f° Pitch:%.1f° Yaw:%.1f°",
+                        euler.z, euler.x, euler.y);
+                    const float speedKmh = glm::length(velocity) * MS_TO_KMH;
+                    ImGui::Text("Speed: %.1f km/h", speedKmh);
+                }
+
+                ImGui::Separator();
+
+                // Reset button
+                if (ImGui::Button("Reset Drone")) {
+                    initializeDrone();
+                }
             }
-            totalAmps += 0.6f;  // Add base electronics current
-            title << " | " << std::setprecision(1) << totalAmps << "A";
-        }
+            ImGui::End();
 
-        title << " | Flight: " << elapsedMinutes << ":" << std::setw(2) << std::setfill('0')
-            << elapsedSecondsRemainder << " | ";
+            // Joystick controls in separate window
+            renderJoystickControls();
+            break;
     }
 
-    if (showMotorInfo) {
-        title << "Motors: ";
-        for (int i = 0; i < NUM_MOTORS; i++) {
-            title << std::setprecision(1) << motors[i].currentRPM / 1000.0f << "K ";
-        }
-        title << "| ";
-    }
-
-    title << "W/S: Throttle | Arrow: Pitch/Roll | A/D: Yaw | N/P: Batt Type | R: Reset";
-
-    glfwSetWindowTitle(window, title.str().c_str());
+    // Render all ImGui draw data
+    ImGui::Render();
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 }
 
 // Function to draw virtual joystick controls
@@ -2200,132 +2452,97 @@ void renderBatteryWarnings() {
     ImGui::End();
 }
 
-// Render the ImGui interface
-void renderImGuiInterface() {
-    // Start the Dear ImGui frame
-    ImGui_ImplOpenGL3_NewFrame();
-    ImGui_ImplGlfw_NewFrame();
-    ImGui::NewFrame();
+void updateWindowTitle(GLFWwindow* window, float fps) {
+    std::stringstream title;
 
-    // Draw battery warnings on top of all windows
-    renderBatteryWarnings();
-
-    // Main control panel
-    ImGui::Begin("Drone Control Panel");
-    {
-        ImGui::Text("Drone Status");
-        ImGui::Separator();
-
-        // Armed status indicator
-        const ImVec4 statusColor = armed ? ImVec4(0.0f, 1.0f, 0.0f, 1.0f)
-            : ImVec4(1.0f, 0.0f, 0.0f, 1.0f);
-        ImGui::TextColored(statusColor, "Status: %s", armed ? "ARMED" : "DISARMED");
-
-        // Arm/disarm button
-        if (ImGui::Button(armed ? "DISARM" : "ARM")) {
-            if (!armed && isDroneOnGround()) {
-                armed = true;
-            }
-            else if (armed) {
-                // Disarm and reset controls
-                armed = false;
-                controls.throttlePosition = 0.0f;
-                input = {};
-                rotationRates = glm::vec3(0.0f);
-                for (auto& motor : motors) {
-                    motor.targetThrottle = 0.0f;
-                    motor.currentThrottle = 0.0f;
-                    motor.isSpinning = false;
-                    motor.thrust = 0.0f;
-                }
-            }
-        }
-
-        ImGui::Separator();
-
-        // Battery info with progress bar
-        const float batteryPct = (battery.charge / battery.capacity) * 100.0f;
-        ImGui::Text("Battery: %.1f%% (%.1fV)", batteryPct, battery.voltage);
-        ImGui::ProgressBar(batteryPct / 100.0f, ImVec2(-1.0f, 0.0f), "");
-
-        // Battery type selector
-        const char* types[] = { "1S", "2S", "3S", "4S", "5S", "6S" };
-        int currentType = static_cast<int>(droneConfig.batteryType);
-        if (ImGui::Combo("Battery Type", &currentType, types, IM_ARRAYSIZE(types))) {
-            droneConfig.batteryType = static_cast<BatteryType>(currentType);
-            droneConfig.updateMinBatteryVoltage();
-            battery.configureBattery(droneConfig.batteryType);
-            initializeDrone();
-        }
-
-        ImGui::Separator();
-
-        // Motor information
-        if (ImGui::CollapsingHeader("Motors", ImGuiTreeNodeFlags_DefaultOpen)) {
-            for (int i = 0; i < NUM_MOTORS; ++i) {
-                ImGui::PushID(i);
-                ImGui::Text("Motor %d: %.0f RPM", i + 1, motors[i].currentRPM);
-                ImGui::ProgressBar(motors[i].currentThrottle, ImVec2(-1.0f, 0.0f), "");
-                ImGui::PopID();
-            }
-        }
-
-        ImGui::Separator();
-
-        // Telemetry data
-        if (ImGui::CollapsingHeader("Telemetry", ImGuiTreeNodeFlags_DefaultOpen)) {
-            const glm::vec3 euler = quatToEuler(droneQuat);
-            ImGui::Text("Position: X:%.2f Y:%.2f Z:%.2f",
-                dronePosition.x, dronePosition.y, dronePosition.z);
-            ImGui::Text("Angles: Roll:%.1f° Pitch:%.1f° Yaw:%.1f°",
-                euler.z, euler.x, euler.y);
-            const float speedKmh = glm::length(velocity) * MS_TO_KMH;
-            ImGui::Text("Speed: %.1f km/h", speedKmh);
-        }
-
-        ImGui::Separator();
-
-        // Reset button
-        if (ImGui::Button("Reset Drone")) {
-            initializeDrone();
-        }
+    // Safety check for invalid values
+    bool validData = true;
+    if (std::isnan(dronePosition.y) || std::isnan(glm::length(velocity))) {
+        validData = false;
     }
-    ImGui::End();
 
-    // Joystick controls in separate window
-    renderJoystickControls();
+    glm::vec3 eulerAngles = quatToEuler(droneQuat);
 
-    // Render all ImGui draw data
-    ImGui::Render();
-    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-}
+    float speedMS = validData ? glm::length(velocity) : 0.0f;
+    float speedKMH = speedMS * MS_TO_KMH;
 
-// Initialize ImGui
-void initImGui(GLFWwindow* window) {
-    // Setup Dear ImGui context
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO(); (void)io;
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
+    auto currentTime = std::chrono::steady_clock::now();
+    std::chrono::duration<float> elapsedSeconds = currentTime - simulationStartTime;
+    int elapsedMinutes = static_cast<int>(elapsedSeconds.count()) / 60;
+    int elapsedSecondsRemainder = static_cast<int>(elapsedSeconds.count()) % 60;
 
-    // Setup Dear ImGui style
-    ImGui::StyleColorsDark();
+    float batteryPercentage = (battery.charge / battery.capacity) * 100.0f;
 
-    // Setup Platform/Renderer backends
-    const char* glsl_version = "#version 330";
-    ImGui_ImplGlfw_InitForOpenGL(window, true);
-    ImGui_ImplOpenGL3_Init(glsl_version);
+    // If battery is depleted, show a more prominent warning
+    if (battery.isDepleted) {
+        title << "!!! BATTERY DEPLETED !!! | ";
+    }
 
-    // Load default font
-    io.Fonts->AddFontDefault();
-}
+    title << "FPV Drone Sim | ";
+    title << (armed ? "ARMED | " : "DISARMED | ");
+    title << "FPS: " << std::fixed << std::setprecision(1) << fps << " | ";
+    title << getBatteryTypeName(droneConfig.batteryType) << " | ";
+    title << droneFrame.frameSizeInches << "\" Frame | ";
+    title << "FPV Cam: " << std::setprecision(0) << std::showpos << cameraAngle << "° | ";
 
-// Shutdown ImGui
-void shutdownImGui() {
-    ImGui_ImplOpenGL3_Shutdown();
-    ImGui_ImplGlfw_Shutdown();
-    ImGui::DestroyContext();
+    if (showSimulationInfo) {
+        title << "Speed: " << (validData ? std::to_string(speedKMH) + " km/h" : "n/a") << " | "
+            << "Alt: " << (validData ? std::to_string(dronePosition.y) + "m" : "n/a") << " | ";
+    }
+
+    if (showControlInfo) {
+        title << "Throttle: " << std::setprecision(2) << controls.throttlePosition << " | ";
+    }
+
+    if (showBatteryInfo) {
+        // Show actual battery charge percentage
+        title << "Batt: " << std::setprecision(1) << batteryPercentage << "% | ";
+
+        // Show voltage with an indication when it's under load
+        float currentVoltage = battery.baseBatteryVoltage - battery.currentVoltageSag;
+        title << std::setprecision(1) << currentVoltage << "V";
+
+        // Show base voltage when under load
+        if (battery.currentVoltageSag > 0.2f) {
+            title << " (" << std::setprecision(1) << battery.baseBatteryVoltage << "V no load)";
+        }
+
+        // Warning system based on actual battery charge, not temporary voltage sag
+        if (battery.isDepleted) {
+            title << " [EMPTY]";
+        }
+        else if (batteryPercentage < 15.0f) {
+            title << " [LOW!]";     // Very low capacity
+        }
+        else if (batteryPercentage < 30.0f) {
+            title << " [Low]";      // Low capacity warning
+        }
+
+        // Show current draw when armed
+        if (armed && showMotorInfo) {
+            float totalAmps = 0.0f;
+            for (int i = 0; i < NUM_MOTORS; i++) {
+                totalAmps += motors[i].currentDraw;
+            }
+            totalAmps += 0.6f;  // Add base electronics current
+            title << " | " << std::setprecision(1) << totalAmps << "A";
+        }
+
+        title << " | Flight: " << elapsedMinutes << ":" << std::setw(2) << std::setfill('0')
+            << elapsedSecondsRemainder << " | ";
+    }
+
+    if (showMotorInfo) {
+        title << "Motors: ";
+        for (int i = 0; i < NUM_MOTORS; i++) {
+            title << std::setprecision(1) << motors[i].currentRPM / 1000.0f << "K ";
+        }
+        title << "| ";
+    }
+
+    title << "W/S: Throttle | Arrow: Pitch/Roll | A/D: Yaw | N/P: Batt Type | R: Reset";
+
+    glfwSetWindowTitle(window, title.str().c_str());
 }
 
 //-------------------------------------------------------
@@ -2382,6 +2599,17 @@ int main() {
         // Process input and update simulation
         processInput(window);
 
+        // Safety check for quaternion normalization
+        if (std::abs(glm::length(droneQuat) - 1.0f) > 0.01f) {
+            droneQuat = glm::normalize(droneQuat);
+        }
+
+        // Check for NaN in critical values and reset if needed
+        if (std::isnan(dronePosition.x) || std::isnan(velocity.x) || std::isnan(droneQuat.w)) {
+            std::cout << "Warning: Detected invalid simulation state, resetting..." << std::endl;
+            initializeDrone();
+        }
+
         // Calculate FPS
         const float dt = (deltaTime > 1e-4f ? deltaTime : 1e-4f);
         const float fps = 1.0f / dt;
@@ -2422,6 +2650,14 @@ int main() {
                 glm::quat fixRot = glm::angleAxis(glm::radians(corrAngle), glm::vec3(1.0f, 0.0f, 0.0f));
                 combinedRot = fixRot * combinedRot;
             }
+        }
+
+        // Safety check for camera position - prevent NaN and extreme values
+        if (std::isnan(camPos.x) || std::isnan(camPos.y) || std::isnan(camPos.z) ||
+            std::abs(camPos.x) > 10000.0f || std::abs(camPos.y) > 10000.0f || std::abs(camPos.z) > 10000.0f) {
+            // Reset to a safe position
+            camPos = glm::vec3(0.0f, 5.0f, 0.0f);
+            std::cout << "Warning: Camera position reset due to invalid values" << std::endl;
         }
 
         // Create view matrix
